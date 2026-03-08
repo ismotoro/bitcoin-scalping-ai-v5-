@@ -1328,9 +1328,11 @@ function drawSparkline(){
 // ── GEMINI AI ─────────────────────────────────────────────────
 var geminiState={
   apiKey:'',
-  lastCallTs:0,
-  cooldownMs:30000, // 30s cooldown between calls (free tier: 15 RPM, safe)
+  cooldownMs:5000,      // normal cooldown: 5s between calls
+  rateLimitCooldownMs:65000, // after 429: wait 65s then auto-retry
   cooldownTimer:null,
+  autoRetryTimer:null,
+  pendingAutoRetry:false,
 };
 
 function saveGeminiKey(){
@@ -1341,7 +1343,6 @@ function saveGeminiKey(){
   document.getElementById('gemini-key-input').placeholder='API key saved ✓';
   document.getElementById('gemini-ask-btn').disabled=false;
   showGeminiStatus('API KEY SAVED — READY','ok');
-  // persist to sessionStorage so page refresh doesn't lose it
   try{ sessionStorage.setItem('gkey', val); } catch(e){}
 }
 
@@ -1350,36 +1351,42 @@ function showGeminiStatus(msg,cls){
   el.textContent=msg; el.className='gemini-status '+(cls||'');
 }
 
-function startCooldown(){
-  var endTs=Date.now()+geminiState.cooldownMs;
+function startCooldown(ms, autoRetry){
+  var endTs=Date.now()+ms;
   var btn=document.getElementById('gemini-ask-btn');
   var cdRow=document.getElementById('gemini-cooldown-row');
   btn.disabled=true;
   cdRow.style.display='block';
   if(geminiState.cooldownTimer) clearInterval(geminiState.cooldownTimer);
+  if(geminiState.autoRetryTimer){ clearTimeout(geminiState.autoRetryTimer); geminiState.autoRetryTimer=null; }
   geminiState.cooldownTimer=setInterval(function(){
     var left=Math.ceil((endTs-Date.now())/1000);
     if(left<=0){
       clearInterval(geminiState.cooldownTimer);
       geminiState.cooldownTimer=null;
-      btn.disabled=false;
       cdRow.style.display='none';
       cdRow.textContent='';
+      if(autoRetry){
+        // auto-retry after rate limit cooldown expires
+        showGeminiStatus('RETRYING AUTOMATICALLY…','loading');
+        btn.disabled=true;
+        geminiState.autoRetryTimer=setTimeout(function(){ askGemini(true); }, 800);
+      } else {
+        btn.disabled=false;
+        showGeminiStatus('READY — CLICK TO ANALYZE','ok');
+      }
     } else {
-      cdRow.textContent='NEXT ANALYSIS IN '+left+'s';
+      if(autoRetry){
+        cdRow.textContent='RATE LIMIT — AUTO-RETRY IN '+left+'s';
+      } else {
+        cdRow.textContent='NEXT ANALYSIS IN '+left+'s';
+      }
     }
   },500);
 }
 
-async function askGemini(){
-  if(!geminiState.apiKey){ showGeminiStatus('SAVE YOUR API KEY FIRST','err'); return; }
+function buildGeminiPrompt(){
   var I=state.indicators;
-  if(!I||!I.price){ showGeminiStatus('WAITING FOR MARKET DATA…','loading'); return; }
-
-  document.getElementById('gemini-ask-btn').disabled=true;
-  showGeminiStatus('GEMINI IS ANALYZING…','loading');
-  document.getElementById('gemini-response').classList.remove('show');
-
   var htf5=document.getElementById('htf-5m').textContent||'──';
   var htf15=document.getElementById('htf-15m').textContent||'──';
   var htf1h=document.getElementById('htf-1h').textContent||'──';
@@ -1390,8 +1397,7 @@ async function askGemini(){
     if(h>=7&&h<16) return 'London (medium volatility)';
     return 'Asia (low volatility)';
   })();
-
-  var prompt=[
+  return [
     'You are an expert Bitcoin scalp trader. Analyze this real-time market data and give a SHORT, actionable assessment.',
     '',
     'CURRENT BTC/USDT DATA:',
@@ -1411,13 +1417,23 @@ async function askGemini(){
     '• Current Session: '+session,
     '',
     'TASK: In 3-4 sentences max:',
-    '1. State your overall bias (BULLISH / BEARISH / NEUTRAL) in the very first word',
+    '1. State your overall bias (BULLISH / BEARISH / NEUTRAL) as the very first word',
     '2. Explain the key reason(s)',
     '3. Name the most important level to watch',
     '4. One concrete scalp tip for right now',
     '',
-    'Be direct and concise. No disclaimers, no fluff. Start your response with BULLISH, BEARISH, or NEUTRAL.'
+    'Be direct and concise. No disclaimers. Start with BULLISH, BEARISH, or NEUTRAL.'
   ].join('\n');
+}
+
+async function askGemini(isAutoRetry){
+  if(!geminiState.apiKey){ showGeminiStatus('SAVE YOUR API KEY FIRST','err'); return; }
+  var I=state.indicators;
+  if(!I||!I.price){ showGeminiStatus('WAITING FOR MARKET DATA…','loading'); return; }
+
+  document.getElementById('gemini-ask-btn').disabled=true;
+  if(!isAutoRetry) document.getElementById('gemini-response').classList.remove('show');
+  showGeminiStatus('GEMINI IS ANALYZING…','loading');
 
   try{
     var res=await fetch(
@@ -1426,7 +1442,7 @@ async function askGemini(){
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({
-          contents:[{parts:[{text:prompt}]}],
+          contents:[{parts:[{text:buildGeminiPrompt()}]}],
           generationConfig:{maxOutputTokens:220,temperature:0.4,topP:0.85}
         })
       }
@@ -1434,26 +1450,32 @@ async function askGemini(){
 
     if(!res.ok){
       var errData=await res.json().catch(function(){return{};});
-      var errMsg=(errData.error&&errData.error.message)||('HTTP '+res.status);
-      if(res.status===400) showGeminiStatus('INVALID API KEY — CHECK AND RE-SAVE','err');
-      else if(res.status===429) showGeminiStatus('RATE LIMIT HIT — WAIT 60s','err');
-      else showGeminiStatus('API ERROR: '+errMsg.slice(0,40).toUpperCase(),'err');
-      document.getElementById('gemini-ask-btn').disabled=false;
+      if(res.status===400){
+        showGeminiStatus('INVALID API KEY — RE-SAVE A VALID KEY','err');
+        document.getElementById('gemini-ask-btn').disabled=false;
+      } else if(res.status===429){
+        // Rate limit: auto-retry after 65s cooldown
+        showGeminiStatus('RATE LIMIT HIT — AUTO-RETRYING IN 65s…','loading');
+        startCooldown(geminiState.rateLimitCooldownMs, true);
+      } else {
+        var errMsg=((errData.error&&errData.error.message)||('HTTP '+res.status)).slice(0,50);
+        showGeminiStatus('API ERROR: '+errMsg.toUpperCase(),'err');
+        document.getElementById('gemini-ask-btn').disabled=false;
+      }
       return;
     }
 
     var data=await res.json();
     var text='';
-    try{
-      text=data.candidates[0].content.parts[0].text.trim();
-    } catch(e){
-      showGeminiStatus('UNEXPECTED RESPONSE FORMAT','err');
+    try{ text=data.candidates[0].content.parts[0].text.trim(); }
+    catch(e){
+      showGeminiStatus('UNEXPECTED RESPONSE — TRY AGAIN','err');
       document.getElementById('gemini-ask-btn').disabled=false;
       return;
     }
 
-    // Determine verdict from first word
-    var firstWord=text.split(/[\s\n]/)[0].toUpperCase().replace(/[^A-Z]/g,'');
+    // Parse verdict from first word
+    var firstWord=text.split(/[\s\n,.!]/)[0].toUpperCase().replace(/[^A-Z]/g,'');
     var verdictCls='neut', verdictTxt='NEUTRAL';
     if(firstWord==='BULLISH'){verdictCls='bull';verdictTxt='▲ BULLISH';}
     else if(firstWord==='BEARISH'){verdictCls='bear';verdictTxt='▼ BEARISH';}
@@ -1463,8 +1485,9 @@ async function askGemini(){
     document.getElementById('gemini-text').textContent=text;
     document.getElementById('gemini-ts').textContent=new Date().toTimeString().slice(0,8);
     document.getElementById('gemini-response').classList.add('show');
-    showGeminiStatus('ANALYSIS COMPLETE','ok');
-    startCooldown();
+    showGeminiStatus('ANALYSIS COMPLETE ✓','ok');
+    // Normal 5s cooldown after success
+    startCooldown(geminiState.cooldownMs, false);
 
   } catch(e){
     showGeminiStatus('NETWORK ERROR — CHECK CONNECTION','err');
@@ -1480,7 +1503,7 @@ async function askGemini(){
       geminiState.apiKey=saved;
       document.getElementById('gemini-key-input').placeholder='API key saved ✓';
       document.getElementById('gemini-ask-btn').disabled=false;
-      showGeminiStatus('API KEY RESTORED','ok');
+      showGeminiStatus('API KEY RESTORED — READY','ok');
     }
   } catch(e){}
 })();
