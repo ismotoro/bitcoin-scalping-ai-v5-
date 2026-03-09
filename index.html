@@ -261,21 +261,6 @@ body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background:
 .gemini-title{font-family:‘Orbitron’,monospace;font-size:9px;letter-spacing:3px;color:var(–text-dim);font-weight:600;}
 .gemini-badge{font-family:‘Share Tech Mono’,monospace;font-size:9px;letter-spacing:1px;padding:2px 6px;border-radius:2px;border:1px solid rgba(66,133,244,0.4);color:#4285f4;background:rgba(66,133,244,0.08);}
 .gemini-key-row{display:flex;gap:5px;margin-bottom:8px;}
-.gemini-key-input{
-flex:1;background:#1c2130!important;border:1px solid var(–border);border-radius:3px;
-padding:5px 8px;font-family:‘Share Tech Mono’,monospace;font-size:10px;
-color:#e6e6e6;letter-spacing:1px;outline:none;transition:border-color 0.2s;
-}
-.gemini-key-input:focus{border-color:rgba(66,133,244,0.5);}
-.gemini-key-input::placeholder{color:var(–text-dim);opacity:0.5;}
-.gemini-save-btn{
-background:rgba(66,133,244,0.12);border:1px solid rgba(66,133,244,0.3);
-color:#4285f4;font-family:‘Share Tech Mono’,monospace;font-size:10px;
-padding:5px 10px;border-radius:3px;cursor:pointer;letter-spacing:1px;
-transition:all 0.2s;white-space:nowrap;
-}
-.gemini-save-btn:hover{background:rgba(66,133,244,0.22);border-color:rgba(66,133,244,0.6);}
-.gemini-save-btn:disabled{opacity:0.4;cursor:not-allowed;}
 .gemini-ask-btn{
 width:100%;background:linear-gradient(135deg,rgba(66,133,244,0.15),rgba(52,168,83,0.1));
 border:1px solid rgba(66,133,244,0.35);color:#4285f4;
@@ -656,17 +641,10 @@ text-align:center;padding:6px;border-radius:3px;margin-bottom:6px;
     <span class="gemini-title">◈ GEMINI AI ANALYSIS</span>
     <span class="gemini-badge">POWERED BY GOOGLE AI</span>
   </div>
-  <div class="gemini-hint">
-    Free API key: <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a> → Get API Key (no credit card needed)
-  </div>
-  <div class="gemini-key-row">
-    <input class="gemini-key-input" type="password" id="gemini-key-input" placeholder="Paste your Gemini API key here…" autocomplete="off" spellcheck="false">
-    <button class="gemini-save-btn" id="gemini-save-btn" onclick="saveGeminiKey()">SAVE</button>
-  </div>
-  <button class="gemini-ask-btn" id="gemini-ask-btn" onclick="askGemini()" disabled>
+  <button class="gemini-ask-btn" id="gemini-ask-btn" onclick="askGemini()">
     <span class="g-icon">✦</span> ANALYZE CURRENT MARKET
   </button>
-  <div class="gemini-status" id="gemini-status"></div>
+  <div class="gemini-status" id="gemini-status">INITIALIZING…</div>
   <div id="gemini-cooldown-row" class="gemini-cooldown" style="display:none;"></div>
   <div class="gemini-response" id="gemini-response">
     <div class="gemini-response-label">GEMINI AI SAYS</div>
@@ -827,10 +805,29 @@ function setTimeframe(tf){
 }
 
 // ── DATA FETCH ───────────────────────────────────────────────
+// Multiple Binance endpoints as fallbacks for CORS/network issues
+var BINANCE_HOSTS=['https://api.binance.com','https://api1.binance.com','https://api2.binance.com','https://api3.binance.com'];
+var currentHostIdx=0;
+function binanceUrl(path){
+  return BINANCE_HOSTS[currentHostIdx]+path;
+}
+async function binanceFetch(path){
+  for(var attempt=0;attempt<BINANCE_HOSTS.length;attempt++){
+    var idx=(currentHostIdx+attempt)%BINANCE_HOSTS.length;
+    try{
+      var res=await fetch(BINANCE_HOSTS[idx]+path,{cache:'no-store',mode:'cors'});
+      if(res.ok){
+        currentHostIdx=idx; // remember working host
+        return res;
+      }
+    } catch(e){ /* try next host */ }
+  }
+  throw new Error('All Binance endpoints failed');
+}
+
 async function fetchPrice(){
   try{
-    var res=await fetch('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT',{cache:'no-store'});
-    if(!res.ok) throw new Error();
+    var res=await binanceFetch('/api/v3/ticker/price?symbol=BTCUSDT');
     var d=await res.json();
     state.prevPrice=state.price;
     state.price=parseFloat(d.price);
@@ -843,8 +840,7 @@ async function fetchPrice(){
 }
 async function fetch24h(){
   try{
-    var res=await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT');
-    if(!res.ok) return;
+    var res=await binanceFetch('/api/v3/ticker/24hr?symbol=BTCUSDT');
     var d=await res.json();
     state.price24hAgo=parseFloat(d.openPrice);
   } catch(e){}
@@ -853,18 +849,17 @@ async function fetchCandles(){
   var m={'1':'1m','5':'5m','15':'15m','60':'1h'};
   var iv=m[state.currentTF]||'5m';
   try{
-    var res=await fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval='+iv+'&limit=250');
-    if(!res.ok) throw new Error();
+    var res=await binanceFetch('/api/v3/klines?symbol=BTCUSDT&interval='+iv+'&limit=250');
     var raw=await res.json();
     state.candles=raw.map(function(k){return{t:k[0],o:parseFloat(k[1]),h:parseFloat(k[2]),l:parseFloat(k[3]),c:parseFloat(k[4]),v:parseFloat(k[5])};});
     computeIndicators();
+    setConnected(true);
   } catch(e){ setConnected(false); }
 }
 async function fetchHTFCandles(){
   async function fetchTF(iv){
     try{
-      var res=await fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval='+iv+'&limit=60');
-      if(!res.ok) return null;
+      var res=await binanceFetch('/api/v3/klines?symbol=BTCUSDT&interval='+iv+'&limit=60');
       var raw=await res.json();
       return raw.map(function(k){return{o:parseFloat(k[1]),h:parseFloat(k[2]),l:parseFloat(k[3]),c:parseFloat(k[4]),v:parseFloat(k[5])};});
     } catch(e){ return null; }
@@ -1030,6 +1025,7 @@ function computeIndicators(){
   };
   evaluateSignal();
   updateExtendedUI();
+  geminiAutoStart();
 }
 
 // ── SIGNAL ENGINE ────────────────────────────────────────────
@@ -1327,36 +1323,25 @@ function drawSparkline(){
 
 // ── GEMINI AI ─────────────────────────────────────────────────
 var geminiState={
-  apiKey:'',
-  cooldownMs:5000,      // normal cooldown: 5s between calls
-  rateLimitCooldownMs:65000, // after 429: wait 65s then auto-retry
+  apiKey:'AIzaSyA3fMkxS4BVkgHMo9s5RkKlB37AZ93dGFQ',
+  cooldownMs:5000,
+  rateLimitCooldownMs:65000,
   cooldownTimer:null,
   autoRetryTimer:null,
-  pendingAutoRetry:false,
+  hasAnalyzedOnce:false,
 };
-
-function saveGeminiKey(){
-  var val=document.getElementById('gemini-key-input').value.trim();
-  if(!val){ showGeminiStatus('KEY CANNOT BE EMPTY','err'); return; }
-  geminiState.apiKey=val;
-  document.getElementById('gemini-key-input').value='';
-  document.getElementById('gemini-key-input').placeholder='API key saved ✓';
-  document.getElementById('gemini-ask-btn').disabled=false;
-  showGeminiStatus('API KEY SAVED — READY','ok');
-  try{ sessionStorage.setItem('gkey', val); } catch(e){}
-}
 
 function showGeminiStatus(msg,cls){
   var el=document.getElementById('gemini-status');
-  el.textContent=msg; el.className='gemini-status '+(cls||'');
+  if(el){ el.textContent=msg; el.className='gemini-status '+(cls||''); }
 }
 
-function startCooldown(ms, autoRetry){
+function startCooldown(ms,autoRetry){
   var endTs=Date.now()+ms;
   var btn=document.getElementById('gemini-ask-btn');
   var cdRow=document.getElementById('gemini-cooldown-row');
-  btn.disabled=true;
-  cdRow.style.display='block';
+  if(btn) btn.disabled=true;
+  if(cdRow) cdRow.style.display='block';
   if(geminiState.cooldownTimer) clearInterval(geminiState.cooldownTimer);
   if(geminiState.autoRetryTimer){ clearTimeout(geminiState.autoRetryTimer); geminiState.autoRetryTimer=null; }
   geminiState.cooldownTimer=setInterval(function(){
@@ -1364,23 +1349,17 @@ function startCooldown(ms, autoRetry){
     if(left<=0){
       clearInterval(geminiState.cooldownTimer);
       geminiState.cooldownTimer=null;
-      cdRow.style.display='none';
-      cdRow.textContent='';
+      if(cdRow){ cdRow.style.display='none'; cdRow.textContent=''; }
       if(autoRetry){
-        // auto-retry after rate limit cooldown expires
         showGeminiStatus('RETRYING AUTOMATICALLY…','loading');
-        btn.disabled=true;
-        geminiState.autoRetryTimer=setTimeout(function(){ askGemini(true); }, 800);
+        if(btn) btn.disabled=true;
+        geminiState.autoRetryTimer=setTimeout(function(){ askGemini(true); },800);
       } else {
-        btn.disabled=false;
-        showGeminiStatus('READY — CLICK TO ANALYZE','ok');
+        if(btn) btn.disabled=false;
+        showGeminiStatus('READY — CLICK TO RE-ANALYZE','ok');
       }
     } else {
-      if(autoRetry){
-        cdRow.textContent='RATE LIMIT — AUTO-RETRY IN '+left+'s';
-      } else {
-        cdRow.textContent='NEXT ANALYSIS IN '+left+'s';
-      }
+      if(cdRow) cdRow.textContent=autoRetry?'RATE LIMIT — AUTO-RETRY IN '+left+'s':'NEXT ANALYSIS IN '+left+'s';
     }
   },500);
 }
@@ -1391,16 +1370,11 @@ function buildGeminiPrompt(){
   var htf15=document.getElementById('htf-15m').textContent||'──';
   var htf1h=document.getElementById('htf-1h').textContent||'──';
   var regime=I.regime||'RANGING';
-  var session=(function(){
-    var h=new Date().getUTCHours();
-    if(h>=12&&h<21) return 'New York (high volatility)';
-    if(h>=7&&h<16) return 'London (medium volatility)';
-    return 'Asia (low volatility)';
-  })();
+  var utcH=new Date().getUTCHours();
+  var session=utcH>=12&&utcH<21?'New York (high volatility)':utcH>=7&&utcH<16?'London (medium volatility)':'Asia (low volatility)';
   return [
     'You are an expert Bitcoin scalp trader. Analyze this real-time market data and give a SHORT, actionable assessment.',
-    '',
-    'CURRENT BTC/USDT DATA:',
+    '','CURRENT BTC/USDT DATA:',
     '• Price: $'+I.price.toFixed(2),
     '• RSI(14): '+I.RSI.toFixed(1),
     '• EMA Trend: '+I.emaTrend+' (strength: '+I.emaTrendStrength+'%)',
@@ -1415,103 +1389,78 @@ function buildGeminiPrompt(){
     '• HTF Bias — 5m: '+htf5+' | 15m: '+htf15+' | 1h: '+htf1h,
     '• Market Regime: '+regime,
     '• Current Session: '+session,
-    '',
-    'TASK: In 3-4 sentences max:',
+    '','TASK: In 3-4 sentences max:',
     '1. State your overall bias (BULLISH / BEARISH / NEUTRAL) as the very first word',
     '2. Explain the key reason(s)',
-    '3. Name the most important level to watch',
+    '3. Name the most important price level to watch',
     '4. One concrete scalp tip for right now',
-    '',
-    'Be direct and concise. No disclaimers. Start with BULLISH, BEARISH, or NEUTRAL.'
+    '','Be direct. No disclaimers. Start with BULLISH, BEARISH, or NEUTRAL.'
   ].join('\n');
 }
 
 async function askGemini(isAutoRetry){
-  if(!geminiState.apiKey){ showGeminiStatus('SAVE YOUR API KEY FIRST','err'); return; }
   var I=state.indicators;
-  if(!I||!I.price){ showGeminiStatus('WAITING FOR MARKET DATA…','loading'); return; }
-
-  document.getElementById('gemini-ask-btn').disabled=true;
+  if(!I||!I.price||!I.RSI){ showGeminiStatus('WAITING FOR MARKET DATA…','loading'); return; }
+  var btn=document.getElementById('gemini-ask-btn');
+  if(btn) btn.disabled=true;
   if(!isAutoRetry) document.getElementById('gemini-response').classList.remove('show');
   showGeminiStatus('GEMINI IS ANALYZING…','loading');
-
   try{
     var res=await fetch(
       'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key='+geminiState.apiKey,
-      {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({
-          contents:[{parts:[{text:buildGeminiPrompt()}]}],
-          generationConfig:{maxOutputTokens:220,temperature:0.4,topP:0.85}
-        })
-      }
+      {method:'POST',headers:{'Content-Type':'application/json'},
+       body:JSON.stringify({contents:[{parts:[{text:buildGeminiPrompt()}]}],
+         generationConfig:{maxOutputTokens:220,temperature:0.4,topP:0.85}})}
     );
-
     if(!res.ok){
       var errData=await res.json().catch(function(){return{};});
-      if(res.status===400){
-        showGeminiStatus('INVALID API KEY — RE-SAVE A VALID KEY','err');
-        document.getElementById('gemini-ask-btn').disabled=false;
-      } else if(res.status===429){
-        // Rate limit: auto-retry after 65s cooldown
-        showGeminiStatus('RATE LIMIT HIT — AUTO-RETRYING IN 65s…','loading');
-        startCooldown(geminiState.rateLimitCooldownMs, true);
+      if(res.status===429){
+        showGeminiStatus('RATE LIMIT — AUTO-RETRYING IN 65s…','loading');
+        startCooldown(geminiState.rateLimitCooldownMs,true);
       } else {
-        var errMsg=((errData.error&&errData.error.message)||('HTTP '+res.status)).slice(0,50);
-        showGeminiStatus('API ERROR: '+errMsg.toUpperCase(),'err');
-        document.getElementById('gemini-ask-btn').disabled=false;
+        var errMsg=((errData.error&&errData.error.message)||('ERROR '+res.status)).slice(0,50).toUpperCase();
+        showGeminiStatus(errMsg,'err');
+        if(btn) btn.disabled=false;
       }
       return;
     }
-
     var data=await res.json();
     var text='';
     try{ text=data.candidates[0].content.parts[0].text.trim(); }
-    catch(e){
-      showGeminiStatus('UNEXPECTED RESPONSE — TRY AGAIN','err');
-      document.getElementById('gemini-ask-btn').disabled=false;
-      return;
-    }
-
-    // Parse verdict from first word
+    catch(e){ showGeminiStatus('UNEXPECTED RESPONSE — TRY AGAIN','err'); if(btn) btn.disabled=false; return; }
     var firstWord=text.split(/[\s\n,.!]/)[0].toUpperCase().replace(/[^A-Z]/g,'');
-    var verdictCls='neut', verdictTxt='NEUTRAL';
+    var verdictCls='neut',verdictTxt='NEUTRAL';
     if(firstWord==='BULLISH'){verdictCls='bull';verdictTxt='▲ BULLISH';}
     else if(firstWord==='BEARISH'){verdictCls='bear';verdictTxt='▼ BEARISH';}
-
     document.getElementById('gemini-verdict').textContent=verdictTxt;
     document.getElementById('gemini-verdict').className='gemini-verdict '+verdictCls;
     document.getElementById('gemini-text').textContent=text;
     document.getElementById('gemini-ts').textContent=new Date().toTimeString().slice(0,8);
     document.getElementById('gemini-response').classList.add('show');
     showGeminiStatus('ANALYSIS COMPLETE ✓','ok');
-    // Normal 5s cooldown after success
-    startCooldown(geminiState.cooldownMs, false);
-
+    geminiState.hasAnalyzedOnce=true;
+    startCooldown(geminiState.cooldownMs,false);
   } catch(e){
-    showGeminiStatus('NETWORK ERROR — CHECK CONNECTION','err');
-    document.getElementById('gemini-ask-btn').disabled=false;
+    showGeminiStatus('NETWORK ERROR — TRY AGAIN','err');
+    if(btn) btn.disabled=false;
   }
 }
 
-// Restore saved key from sessionStorage on page load
-(function(){
-  try{
-    var saved=sessionStorage.getItem('gkey');
-    if(saved){
-      geminiState.apiKey=saved;
-      document.getElementById('gemini-key-input').placeholder='API key saved ✓';
-      document.getElementById('gemini-ask-btn').disabled=false;
-      showGeminiStatus('API KEY RESTORED — READY','ok');
-    }
-  } catch(e){}
-})();
+// Auto-analyze once market data is ready (called from computeIndicators)
+function geminiAutoStart(){
+  if(geminiState.hasAnalyzedOnce||geminiState.cooldownTimer) return;
+  var I=state.indicators;
+  if(I&&I.price&&I.RSI&&I.E20){
+    showGeminiStatus('AUTO-ANALYZING…','loading');
+    setTimeout(function(){ askGemini(false); },1500);
+  }
+}
 
 // ── BOOT ──────────────────────────────────────────────────────
 async function boot(){
   buildTVWidget(state.currentTF);
   renderHistory();
+  showGeminiStatus('LOADING MARKET DATA…','loading');
   await fetch24h();
   await fetchPrice();
   await fetchCandles();
